@@ -1,0 +1,15 @@
+(library
+ (name plank)
+ (libraries
+  core_kernel
+  core_kernel.total_map
+  lwt
+  virtual_dom
+  js_of_ocaml
+  zelkova)
+ (preprocess
+  (pps ppx_jane js_of_ocaml-ppx)))
+
+(cinaps
+ (files component.ml component.mli)
+ (libraries core_kernel))

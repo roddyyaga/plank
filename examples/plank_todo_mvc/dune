@@ -1,0 +1,7 @@
+(executable
+ (name plank_todo_mvc)
+ (libraries core_kernel js_of_ocaml js_of_ocaml-lwt lwt plank)
+ (preprocess
+  (pps ppx_jane lwt_ppx))
+ (promote (until-clean))
+ (modes js))

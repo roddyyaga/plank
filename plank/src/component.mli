@@ -3,83 +3,86 @@ open! Import
 
 type ('output, 'view) t
 
+val to_app : (unit, Vdom.Node.t) t -> Zelkova.App.packed
+
 val state_machine
   :  initialize:'model
   -> update:('model -> 'action -> 'model)
   -> output:('model -> 'output)
   -> view:('model -> inject:('action -> Vdom.Event.t) -> Vdom.Node.t)
-  -> ('output, Vdom.Node.t) t
+  -> ('output, ('action -> Vdom.Event.t) * Vdom.Node.t) t
 
-val map : ('a, 'view_a) t -> f:('a * 'view_a -> 'b * 'view_b) -> ('b, 'view_b) t
+val no_output : _ -> unit
+val cap : ('a, _ * Vdom.Node.t) t -> ('a, Vdom.Node.t) t
+
+val state
+  :  initial:'a
+  -> view:('a -> inject:('a -> Vdom.Event.t) -> Vdom.Node.t)
+  -> ('a, ('a -> Vdom.Event.t) * Vdom.Node.t) t
+
+val return : 'output -> 'view -> ('output, 'view) t
+val view : 'view -> (unit, 'view) t
+
+(** In type theory jargon, [('output, 'view) t] is a special kind of biapplicative.
+ * This definition of [map] is stronger than the normal definition because of the extra parameter to [view]. Combined with the regular versions of [return] and [both],
+ * we can define [apply] as in the standard signature (https://hackage.haskell.org/package/bifunctors-3.2.0.1/docs/Data-Biapplicative.html). We don't define it here because it seems unlikely to be useful.
+ *)
+val map
+  :  ('a, 'view_a) t
+  -> output:('a -> 'b)
+  -> view:('a -> 'view_a -> 'view_b)
+  -> ('b, 'view_b) t
+
 val both : ('a, 'view_a) t -> ('b, 'view_b) t -> ('a * 'b, 'view_a * 'view_b) t
-val to_app : (_, Vdom.Node.t) t -> Zelkova.App.packed
+
+val map2
+  :  ('a, 'v_a) t
+  -> ('b, 'v_b) t
+  -> output:('a -> 'b -> 'c)
+  -> view:('a * 'b -> 'v_a * 'v_b -> 'v_c)
+  -> ('c, 'v_c) t
+
+val all : ('a, 'view) t list -> ('a list, 'view list) t
+
+val all_map
+  :  ('k, ('a, 'view) t, 'cmp) Map.t
+  -> (('k, 'a, 'cmp) Map.t, ('k, 'view, 'cmp) Map.t) t
+
+module Output : sig
+  val map : ('a, 'v) t -> f:('a -> 'b) -> ('b, 'v) t
+
+  module Let_syntax : sig
+    module Let_syntax : sig
+      val map : ('a, 'v) t -> f:('a -> 'b) -> ('b, 'v) t
+    end
+  end
+end
+
+module View : sig
+  val map : ('o, 'v1) t -> f:('v1 -> 'v2) -> ('o, 'v2) t
+
+  module Infix : sig
+    val ( >>| ) : ('o, 'v1) t -> ('v1 -> 'v2) -> ('o, 'v2) t
+  end
+
+  module Let_syntax : sig
+    module Let_syntax : sig
+      val map : ('o, 'v1) t -> f:('v1 -> 'v2) -> ('o, 'v2) t
+    end
+  end
+end
 
 val switch
   :  ('a, 'view_a) t
-  -> ('a, ('b, 'view_b) t, 'cmp, 'enum) Total_map.t
+  -> ('a, ('b, 'view_a -> 'view_b) t, 'cmp, 'enum) Total_map.t
   -> ('b, 'view_b) t
 
-module Let_syntax : sig
-  module Let_syntax : sig
-    val map : ('a, 'view_a) t -> f:('a * 'view_a -> 'b * 'view_b) -> ('b, 'view_b) t
+(*val list*)
+(*:  ('a, 'view) t list*)
+(*-> (unit, 'view list * ([ `Add of ('a, 'view) t ] -> Vdom.Event.t)) t*)
 
-    (*$
-      open! Core_kernel
-
-      let a i = sprintf "'a_%d" i
-      let view i = sprintf "'v_%d" i
-
-      let write_mapn n =
-        printf "val map%d :\n" n;
-        let n = n + 1 in
-        let args =
-          List.init (n - 1) ~f:(fun i -> sprintf "(%s, %s) t" (a i) (view i))
-          |> String.concat ~sep:" -> "
-        in
-        print_endline args;
-        let f_type =
-          List.init n ~f:(fun i -> sprintf "%s * %s" (a i) (view i))
-          |> String.concat ~sep:" -> "
-        in
-        printf "-> f:(%s)\n" f_type;
-        printf "-> (%s, %s) t\n" (a (n - 1)) (view (n - 1))
-      ;;
-
-      let () =
-        List.init 10 ~f:Fn.id |> List.tl_exn |> List.tl_exn |> List.iter ~f:write_mapn
-      ;;
-    *)val map2 :
-('a_0, 'v_0) t -> ('a_1, 'v_1) t
--> f:('a_0 * 'v_0 -> 'a_1 * 'v_1 -> 'a_2 * 'v_2)
--> ('a_2, 'v_2) t
-val map3 :
-('a_0, 'v_0) t -> ('a_1, 'v_1) t -> ('a_2, 'v_2) t
--> f:('a_0 * 'v_0 -> 'a_1 * 'v_1 -> 'a_2 * 'v_2 -> 'a_3 * 'v_3)
--> ('a_3, 'v_3) t
-val map4 :
-('a_0, 'v_0) t -> ('a_1, 'v_1) t -> ('a_2, 'v_2) t -> ('a_3, 'v_3) t
--> f:('a_0 * 'v_0 -> 'a_1 * 'v_1 -> 'a_2 * 'v_2 -> 'a_3 * 'v_3 -> 'a_4 * 'v_4)
--> ('a_4, 'v_4) t
-val map5 :
-('a_0, 'v_0) t -> ('a_1, 'v_1) t -> ('a_2, 'v_2) t -> ('a_3, 'v_3) t -> ('a_4, 'v_4) t
--> f:('a_0 * 'v_0 -> 'a_1 * 'v_1 -> 'a_2 * 'v_2 -> 'a_3 * 'v_3 -> 'a_4 * 'v_4 -> 'a_5 * 'v_5)
--> ('a_5, 'v_5) t
-val map6 :
-('a_0, 'v_0) t -> ('a_1, 'v_1) t -> ('a_2, 'v_2) t -> ('a_3, 'v_3) t -> ('a_4, 'v_4) t -> ('a_5, 'v_5) t
--> f:('a_0 * 'v_0 -> 'a_1 * 'v_1 -> 'a_2 * 'v_2 -> 'a_3 * 'v_3 -> 'a_4 * 'v_4 -> 'a_5 * 'v_5 -> 'a_6 * 'v_6)
--> ('a_6, 'v_6) t
-val map7 :
-('a_0, 'v_0) t -> ('a_1, 'v_1) t -> ('a_2, 'v_2) t -> ('a_3, 'v_3) t -> ('a_4, 'v_4) t -> ('a_5, 'v_5) t -> ('a_6, 'v_6) t
--> f:('a_0 * 'v_0 -> 'a_1 * 'v_1 -> 'a_2 * 'v_2 -> 'a_3 * 'v_3 -> 'a_4 * 'v_4 -> 'a_5 * 'v_5 -> 'a_6 * 'v_6 -> 'a_7 * 'v_7)
--> ('a_7, 'v_7) t
-val map8 :
-('a_0, 'v_0) t -> ('a_1, 'v_1) t -> ('a_2, 'v_2) t -> ('a_3, 'v_3) t -> ('a_4, 'v_4) t -> ('a_5, 'v_5) t -> ('a_6, 'v_6) t -> ('a_7, 'v_7) t
--> f:('a_0 * 'v_0 -> 'a_1 * 'v_1 -> 'a_2 * 'v_2 -> 'a_3 * 'v_3 -> 'a_4 * 'v_4 -> 'a_5 * 'v_5 -> 'a_6 * 'v_6 -> 'a_7 * 'v_7 -> 'a_8 * 'v_8)
--> ('a_8, 'v_8) t
-val map9 :
-('a_0, 'v_0) t -> ('a_1, 'v_1) t -> ('a_2, 'v_2) t -> ('a_3, 'v_3) t -> ('a_4, 'v_4) t -> ('a_5, 'v_5) t -> ('a_6, 'v_6) t -> ('a_7, 'v_7) t -> ('a_8, 'v_8) t
--> f:('a_0 * 'v_0 -> 'a_1 * 'v_1 -> 'a_2 * 'v_2 -> 'a_3 * 'v_3 -> 'a_4 * 'v_4 -> 'a_5 * 'v_5 -> 'a_6 * 'v_6 -> 'a_7 * 'v_7 -> 'a_8 * 'v_8 -> 'a_9 * 'v_9)
--> ('a_9, 'v_9) t
-(*$*)
-  end
+module Switch : sig
+  module Infix : sig end
 end
+
+val textbox : (string, (string -> Vdom.Event.t) * Vdom.Node.t) t

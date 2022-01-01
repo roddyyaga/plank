@@ -9,40 +9,115 @@ type ('model, 'action, 'output) state_machine =
   }
 
 type (_, _) t =
-  | State_machine : ('model, 'action, 'output) state_machine -> ('output, Vdom.Node.t) t
-  | Map : ('a, 'view_a) t * ('a * 'view_a -> 'b * 'view_b) -> ('b, 'view_b) t
+  | Return : ('output * 'view) -> ('output, 'view) t
+  | State_machine :
+      ('model, 'action, 'output) state_machine
+      -> ('output, ('action -> Vdom.Event.t) * Vdom.Node.t) t
+  | Map : ('a, 'view_a, 'b, 'view_b) map -> ('b, 'view_b) t
   | Both : ('a, 'view_a) t * ('b, 'view_b) t -> ('a * 'b, 'view_a * 'view_b) t
   | Switch :
-      ('a, 'view_a) t * ('a, ('b, 'view_b) t, 'cmp, 'enum) Total_map.t
+      ('a, 'view_a) t * ('a, ('b, 'view_a -> 'view_b) t, 'cmp, 'enum) Total_map.t
       -> ('b, 'view_b) t
+
+and ('a, 'view_a, 'b, 'view_b) map =
+  { t : ('a, 'view_a) t
+  ; output : 'a -> 'b
+  ; view : 'a -> 'view_a -> 'view_b
+  }
+
+let return output view = Return (output, view)
+let view view = Return ((), view)
 
 let state_machine ~initialize ~update ~output ~view =
   State_machine { initialize; update; output; view }
 ;;
 
-let map t ~f = Map (t, f)
-let switch on cases = Switch (on, cases)
+let no_output _ = ()
+
+let state ~initial:initialize ~view =
+  state_machine ~initialize ~update:(fun _ latest -> latest) ~output:Fn.id ~view
+;;
+
+let map t ~output ~view = Map { t; output; view }
 let both a b = Both (a, b)
+
+let map2 a_t b_t ~output ~view =
+  both a_t b_t |> map ~output:(fun (a, b) -> output a b) ~view
+;;
+
+let all ts =
+  List.fold ts ~init:(return [] []) ~f:(fun acc t ->
+      both t acc |> map ~output:(fun (x, xs) -> x :: xs) ~view:(fun _ (x, xs) -> x :: xs))
+;;
+
+let all_map t_map =
+  let empty = Map.empty (Map.comparator_s t_map) in
+  Map.fold t_map ~init:(return empty empty) ~f:(fun ~key ~data acc ->
+      both data acc
+      |> map
+           ~output:(fun (data, acc) -> Map.add_exn acc ~key ~data)
+           ~view:(fun _ (data, acc) -> Map.add_exn acc ~key ~data))
+;;
+
+let cap t = map t ~output:Fn.id ~view:(fun _ view -> snd view)
+
+module Output = struct
+  let map t ~f = map t ~output:f ~view:(fun _ v -> v)
+
+  module Let_syntax = struct
+    module Let_syntax = struct
+      let map = map
+    end
+  end
+end
+
+module View = struct
+  let map t ~f = map t ~output:Fn.id ~view:(fun _ v -> f v)
+
+  module Infix = struct
+    let ( >>| ) t f = map t ~f
+  end
+
+  module Let_syntax = struct
+    module Let_syntax = struct
+      let map = map
+    end
+  end
+end
+
+let switch on cases = Switch (on, cases)
+
+module Switch = struct
+  module Infix = struct end
+end
 
 module Compiled = struct
   type ('model, 'action, 'output, 'view) t =
     { initial_model : 'model
     ; update : 'model -> 'action -> 'model
-    ; output_and_view : 'model -> inject:('action -> Vdom.Event.t) -> 'output * 'view
+    ; output : 'model -> 'output
+    ; view : 'model -> inject:('action -> Vdom.Event.t) -> 'view
     }
+  [@@deriving fields]
 
   type ('output, 'view) packed =
     | T : ('model, 'action, 'output, 'view) t -> ('output, 'view) packed
+
+  type ('output, 'view) packed_with_model =
+    | Pack_with_model :
+        ('model, 'action, 'output, 'view) t * 'model
+        -> ('output, 'view) packed_with_model
 end
 
 let rec compile : type a view. (a, view) t -> (a, view) Compiled.packed = function
+  | Return (output, view) ->
+    let update () () = () in
+    let output _ = output in
+    let view () ~inject:_ = view in
+    T { Compiled.initial_model = (); update; output; view }
   | State_machine { initialize; update; output; view } ->
-    let output_and_view model ~inject =
-      let view = view model ~inject in
-      let output = output model in
-      output, view
-    in
-    T { Compiled.initial_model = initialize; update; output_and_view }
+    let view model ~inject = inject, view model ~inject in
+    T { Compiled.initial_model = initialize; update; output; view }
   | Both (a_t, b_t) ->
     let (T a) = compile a_t in
     let (T b) = compile b_t in
@@ -51,240 +126,68 @@ let rec compile : type a view. (a, view) t -> (a, view) Compiled.packed = functi
       | `A a_action -> a.update a_model a_action, b_model
       | `B b_action -> a_model, b.update b_model b_action
     in
-    let output_and_view (a_model, b_model) ~inject =
+    let output (a_model, b_model) = a.output a_model, b.output b_model in
+    let view (a_model, b_model) ~inject =
       let a_inject a_action = inject (`A a_action) in
       let b_inject b_action = inject (`B b_action) in
-      let a_output, a_view = a.output_and_view a_model ~inject:a_inject in
-      let b_output, b_view = b.output_and_view b_model ~inject:b_inject in
-      (a_output, b_output), (a_view, b_view)
+      let a_view = a.view a_model ~inject:a_inject in
+      let b_view = b.view b_model ~inject:b_inject in
+      a_view, b_view
     in
-    T { Compiled.initial_model; update; output_and_view }
-  | Map (a_t, f) ->
+    T { Compiled.initial_model; update; output; view }
+  | Map { t = a_t; output = map_output; view = map_view } ->
     let (T t) = compile a_t in
     let initial_model = t.initial_model in
     let update = t.update in
-    let output_and_view model ~inject =
-      let output, view = t.output_and_view model ~inject in
-      f (output, view)
+    let output model = map_output (t.output model) in
+    let view model ~inject =
+      let output = t.output model in
+      map_view output (t.view model ~inject)
     in
-    T { Compiled.initial_model; update; output_and_view }
+    T { Compiled.initial_model; update; output; view }
+  | Switch (a_t, cases) ->
+    let (T a) = compile a_t in
+    let compiled = Total_map.map cases ~f:compile in
+    let open Compiled in
+    let initial_model =
+      ( a.initial_model
+      , Total_map.map compiled ~f:(fun (T b) -> Pack_with_model (b, b.initial_model)) )
+    in
+    let update (a_model, b_models) = function
+      | `Key_action action -> a.update a_model action, b_models
+      | `Value_action (key, b_action) ->
+        let (Pack_with_model (b, b_model)) = Total_map.find b_models key in
+        (* TODO - maybe replace Obj.magic with Type_equal *)
+        let b_model = b.update b_model (Obj.magic b_action) in
+        a_model, Total_map.set b_models key (Pack_with_model (b, b_model))
+    in
+    let output (a_model, b_models) =
+      let (Pack_with_model (b, b_model)) = Total_map.find b_models (a.output a_model) in
+      b.output b_model
+    in
+    let view (a_model, b_models) ~inject =
+      let a_inject key_action = inject (`Key_action key_action) in
+      let a_view = a.view a_model ~inject:a_inject in
+      let a_output = a.output a_model in
+      let (Pack_with_model (b, b_model)) = Total_map.find b_models a_output in
+      let b_inject b_action = inject (`Value_action (a_output, Obj.magic b_action)) in
+      let view_function = b.view b_model ~inject:b_inject in
+      view_function a_view
+    in
+    T { Compiled.initial_model; update; output; view }
 ;;
 
 let to_app : type a. (a, Vdom.Node.t) t -> Zelkova.App.packed =
   let open Zelkova in
   fun t ->
-    let (T { Compiled.initial_model; update; output_and_view }) = compile t in
-    let view model ~inject =
-      let _output, view = output_and_view model ~inject in
-      view
-    in
+    let (T { Compiled.initial_model; update; view; output = _ }) = compile t in
     T (App.create ~initial_model ~update ~view)
 ;;
 
-module Let_syntax = struct
-  module Let_syntax = struct
-    let map = map
-
-    (*$
-      open! Core_kernel
-
-      let a i = sprintf "a_%d" i
-      let view i = sprintf "view_%d" i
-
-      let rec boths = function
-        | 2 -> sprintf "both %s %s" (a 0) (a 1)
-        | n -> sprintf "both (%s) %s" (boths (n - 1)) (a (n - 1))
-      ;;
-
-      let rec nested_tuple make = function
-        | 2 -> sprintf "(%s, %s)" (make 0) (make 1)
-        | n -> sprintf "(%s, %s)" (nested_tuple make (n - 1)) (make (n - 1))
-      ;;
-
-      let write_mapn n =
-        printf "let map%d %s ~f =\n" n (String.concat ~sep:" " (List.init n ~f:a));
-        print_endline (boths n);
-        let outputs = nested_tuple a n in
-        let views = nested_tuple view n in
-        let paired =
-          String.concat
-            ~sep:" "
-            (List.init n ~f:(fun n -> sprintf "(%s, %s)" (a n) (view n)))
-        in
-        printf "|> map ~f:(fun (%s, %s) -> f %s)\n" outputs views paired
-      ;;
-
-      let () =
-        List.init 10 ~f:Fn.id |> List.tl_exn |> List.tl_exn |> List.iter ~f:write_mapn
-      ;;
-    *)
-    let map2 a_0 a_1 ~f =
-      both a_0 a_1
-      |> map ~f:(fun ((a_0, a_1), (view_0, view_1)) -> f (a_0, view_0) (a_1, view_1))
-    ;;
-
-    let map3 a_0 a_1 a_2 ~f =
-      both (both a_0 a_1) a_2
-      |> map ~f:(fun (((a_0, a_1), a_2), ((view_0, view_1), view_2)) ->
-             f (a_0, view_0) (a_1, view_1) (a_2, view_2))
-    ;;
-
-    let map4 a_0 a_1 a_2 a_3 ~f =
-      both (both (both a_0 a_1) a_2) a_3
-      |> map ~f:(fun ((((a_0, a_1), a_2), a_3), (((view_0, view_1), view_2), view_3)) ->
-             f (a_0, view_0) (a_1, view_1) (a_2, view_2) (a_3, view_3))
-    ;;
-
-    let map5 a_0 a_1 a_2 a_3 a_4 ~f =
-      both (both (both (both a_0 a_1) a_2) a_3) a_4
-      |> map
-           ~f:(fun
-                ( ((((a_0, a_1), a_2), a_3), a_4)
-                , ((((view_0, view_1), view_2), view_3), view_4) )
-              -> f (a_0, view_0) (a_1, view_1) (a_2, view_2) (a_3, view_3) (a_4, view_4))
-    ;;
-
-    let map6 a_0 a_1 a_2 a_3 a_4 a_5 ~f =
-      both (both (both (both (both a_0 a_1) a_2) a_3) a_4) a_5
-      |> map
-           ~f:(fun
-                ( (((((a_0, a_1), a_2), a_3), a_4), a_5)
-                , (((((view_0, view_1), view_2), view_3), view_4), view_5) )
-              ->
-             f
-               (a_0, view_0)
-               (a_1, view_1)
-               (a_2, view_2)
-               (a_3, view_3)
-               (a_4, view_4)
-               (a_5, view_5))
-    ;;
-
-    let map7 a_0 a_1 a_2 a_3 a_4 a_5 a_6 ~f =
-      both (both (both (both (both (both a_0 a_1) a_2) a_3) a_4) a_5) a_6
-      |> map
-           ~f:(fun
-                ( ((((((a_0, a_1), a_2), a_3), a_4), a_5), a_6)
-                , ((((((view_0, view_1), view_2), view_3), view_4), view_5), view_6) )
-              ->
-             f
-               (a_0, view_0)
-               (a_1, view_1)
-               (a_2, view_2)
-               (a_3, view_3)
-               (a_4, view_4)
-               (a_5, view_5)
-               (a_6, view_6))
-    ;;
-
-    let map8 a_0 a_1 a_2 a_3 a_4 a_5 a_6 a_7 ~f =
-      both (both (both (both (both (both (both a_0 a_1) a_2) a_3) a_4) a_5) a_6) a_7
-      |> map
-           ~f:(fun
-                ( (((((((a_0, a_1), a_2), a_3), a_4), a_5), a_6), a_7)
-                , ( ((((((view_0, view_1), view_2), view_3), view_4), view_5), view_6)
-                  , view_7 ) )
-              ->
-             f
-               (a_0, view_0)
-               (a_1, view_1)
-               (a_2, view_2)
-               (a_3, view_3)
-               (a_4, view_4)
-               (a_5, view_5)
-               (a_6, view_6)
-               (a_7, view_7))
-    ;;
-
-    let map9 a_0 a_1 a_2 a_3 a_4 a_5 a_6 a_7 a_8 ~f =
-      both
-        (both (both (both (both (both (both (both a_0 a_1) a_2) a_3) a_4) a_5) a_6) a_7)
-        a_8
-      |> map
-           ~f:(fun
-                ( ((((((((a_0, a_1), a_2), a_3), a_4), a_5), a_6), a_7), a_8)
-                , ( ( ((((((view_0, view_1), view_2), view_3), view_4), view_5), view_6)
-                    , view_7 )
-                  , view_8 ) )
-              ->
-             f
-               (a_0, view_0)
-               (a_1, view_1)
-               (a_2, view_2)
-               (a_3, view_3)
-               (a_4, view_4)
-               (a_5, view_5)
-               (a_6, view_6)
-               (a_7, view_7)
-               (a_8, view_8))
-    ;;
-    (*$*)
-  end
-end
-
-let counter =
-  let update x = function
-    | `Incr -> x + 1
-    | `Decr -> x - 1
-  in
-  let view model ~inject =
+let textbox =
+  let view content ~inject =
     let open Vdom in
-    let open Node in
-    div
-      []
-      [ text (sprintf "Counter: %d" model)
-      ; button [ Attr.on_click (fun _ -> inject `Incr) ] [ text "+" ]
-      ; button [ Attr.on_click (fun _ -> inject `Decr) ] [ text "-" ]
-      ]
+    Node.input [ Attr.on_input (fun _ content -> inject content) ] [ Node.text content ]
   in
-  state_machine ~initialize:0 ~update ~output:Fn.id ~view
+  state ~initial:"" ~view
 ;;
-
-let _sum =
-  both counter counter
-  |> map ~f:(fun ((a, b), (a_view, b_view)) -> a + b, Vdom.Node.div [] [ a_view; b_view ])
-;;
-
-let _incred =
-  let open Let_syntax in
-  let%mapn x, view = counter in
-  x + 1, Vdom.Node.(div [] [ text "hallo"; view ])
-;;
-
-let _sum' =
-  let open Let_syntax in
-  let%mapn x, x_view = counter
-  and y, y_view = counter
-  and _z, _z_view = counter in
-  x + y, Vdom.Node.(div [] [ text "hallo"; x_view; y_view ])
-;;
-
-module Enum = struct
-  module T = struct
-    type t =
-      | Foo
-      | Bar
-      | Baz
-    [@@deriving bin_io, compare, enumerate, sexp]
-  end
-
-  include T
-  module Total_map = Total_map.Make (T)
-end
-
-(*let _switch_example =*)
-(*let enum_choice = assert false in*)
-(*let foo_form = assert false in*)
-(*let bar_form = assert false in*)
-(*let baz_form = assert false in*)
-(*let cases =*)
-(*Enum.Total_map.create (function*)
-(*| Foo -> foo_form*)
-(*| Bar -> bar_form*)
-(*| Baz -> baz_form)*)
-(*in*)
-(*let open Let_syntax in*)
-(*let%mapn choice, choice_view = enum_choice*)
-(*and value, value_view = switch enum_choice cases in*)
-(*(choice, value), [ choice_view; value_view ]*)
-(*;;*)
